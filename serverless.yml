@@ -1,0 +1,223 @@
+service: payment-system
+
+# Use serverless-webpack plugin to transpile ES6/ES7
+plugins:
+  - serverless-webpack
+  - serverless-offline
+  - serverless-prune-plugin
+  - serverless-plugin-split-stacks
+  #  - serverless-domain-manager
+custom:
+  serverless-offline:
+    httpPort: 8888
+  service_name: payment-system
+  # Important: The Route53 A and AAAA domain records created by serverless-domain-manager are managed by the API,
+  # not Cloudformation. They do not appear as Resources in the Cloudformation stack for this service.
+  # Do not manage them manually via Route53.
+  # The local functionality creating the domain works perfect
+  # serverless-domain-manager is commented to avoid errors in the deployment creating the basePath, we will keep it until get fix
+  apiDomain: ${file(env.yml):${self:custom.stage}.payment-system_API_URL}
+  domains:
+    test: test.${self:custom.apiDomain}
+    dev: dev.${self:custom.apiDomain}
+    qa: qa.${self:custom.apiDomain}
+    prod: ${self:custom.apiDomain}
+  customDomain:
+    domainName: ${self:custom.domains.${self:custom.stage}}
+    stage: ${self:provider.stage}
+    enabled: true
+    basePath: v2 # This will be prefixed to all routes
+    certificateName: ${self:custom.apiDomain}
+    createRoute53Record: true
+    endpointType: regional
+    securityPolicy: tls_1_2
+    apiType: rest
+  splitStacks:
+    perFunction: false
+    perType: true
+  webpack:
+    webpackConfig: ./webpack.config.js
+    webpackIncludeModules: true
+  stage: ${opt:stage, self:provider.stage}
+  guapiActiveCampaignQueue: ${self:custom.stage}-guapi-active-campaign-queue
+  guapiActiveCampaignDLQueue: ${self:custom.stage}-guapi-active-campaign-dlqueue
+  enabled:
+    test: false
+    dev: false
+    qa: false
+    prod: true
+  prune:
+    automatic: false
+    number: 3
+  datadog:
+    flushMetricsToLogs: true
+    apiKey: ${self:provider.environment.DATADOG_API_KEY}
+    addLayers: true
+    enableXrayTracing: true
+    enableDDTracing: true
+    forwarderArn: arn:aws:lambda:us-west-2:911005779419:function:datadog-forwarder-Forwarder-1J7AI7AUZTI8H
+    enableTags: true
+    injectLogContext: true
+
+provider:
+  name: aws
+  runtime: nodejs12.x
+  # apiGateway:
+  #   apiKeySourceType: HEADER
+  deploymentBucket:
+    name: sls-payment-system-deployments
+  timeout: 900 # 15 min timeout
+  memorySize: 1024
+  stage: dev
+  region: ${file(env.yml):${self:custom.stage}.AWS_REGION_LOCATION}
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - "sqs:*"
+        - "s3:*"
+        - "firehose:*"
+        - "dynamodb:*"
+        - 'lambda:InvokeFunction'
+        - sns:*
+      Resource: "*"
+  environment: ${file(env.yml):${self:custom.stage}}
+  tags:
+    env: ${self:custom.stage}
+    stage: ${self:custom.stage}
+    service: ${self:custom.service_name}
+
+  ## All functions need name and description populated
+  ## Naming convention {stage}-guapi-route-method
+functions:
+  # Global Payments API Integration Set
+  paymentsCreateTransaction:
+    name: ${self:custom.stage}-guapi-payments-transactions-create
+    description: 'HTTP Proxy function for create transaction'
+    handler: handlers/payments/transactions/createOrder.handle
+    events:
+      - http:
+          path: /payments/{shop}/transactions/create
+          method: post
+          cors: true
+          request:
+            parameters:
+              paths:
+                shop: true
+  paymentsCancelTransaction:
+    name: ${self:custom.stage}-guapi-payments-transactions-cancel
+    description: 'HTTP Proxy function for cancel transaction'
+    handler: handlers/payments/transactions/cancelOrder.handle
+    events:
+      - http:
+          path: /payments/{shop}/transactions/{transactionId}/cancel
+          method: post
+          cors: true
+          request:
+            parameters:
+              paths:
+                shop: true
+                orderId: true
+  paymentsAuthorizeTransaction:
+    name: ${self:custom.stage}-guapi-payments-transactions-authorize
+    description: 'HTTP Proxy function for authorize transaction'
+    handler: handlers/payments/transactions/authorizeOrder.handle
+    events:
+      - http:
+          path: /payments/{shop}/transactions/{transactionId}/authorize
+          method: post
+          cors: true
+          request:
+            parameters:
+              paths:
+                shop: true
+                orderId: true
+  paymentsReauthorizeTransaction:
+    name: ${self:custom.stage}-guapi-payments-transactions-reauthorize
+    description: 'HTTP Proxy function for reauthorize transaction'
+    handler: handlers/payments/transactions/reauthorizeOrder.handle
+    events:
+      - http:
+          path: /payments/{shop}/transactions/{transactionId}/reauthorize
+          method: post
+          cors: true
+          request:
+            parameters:
+              paths:
+                shop: true
+                orderId: true
+  paymentsUpdateTransaction:
+    name: ${self:custom.stage}-guapi-payments-transactions-update
+    description: 'HTTP Proxy function for update transaction'
+    handler: handlers/payments/transactions/updateOrder.handle
+    events:
+      - http:
+          path: /payments/{shop}/transactions/{transactionId}/update
+          method: put
+          cors: true
+          request:
+            parameters:
+              paths:
+                shop: true
+                orderId: true
+  paymentsCompleteTransaction:
+    name: ${self:custom.stage}-guapi-payments-transactions-complete
+    description: 'HTTP Proxy function for complete transaction'
+    handler: handlers/payments/transactions/postOrder.handle
+    events:
+      - http:
+          path: /payments/{shop}/transactions/{transactionId}/complete
+          method: post
+          cors: true
+          request:
+            parameters:
+              paths:
+                shop: true
+                orderId: true
+resources:
+  Resources:
+    V2TransactionTable:
+      Type: 'AWS::DynamoDB::Table'
+      DeletionPolicy: Retain
+      Properties:
+        TableName: ${self:custom.stage}-payment-system-transactions
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: shopify_domain
+            AttributeType: S
+          - AttributeName: email
+            AttributeType: S
+          - AttributeName: gu_transaction_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: gu_transaction_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: shopify_domain
+            KeySchema:
+              - AttributeName: shopify_domain
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+          - IndexName: email
+            KeySchema:
+              - AttributeName: email
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+          - IndexName: shopifydomain_orderid
+            KeySchema:
+              - AttributeName: shopifydomain_orderid
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+          - IndexName: shopifydomain_checkout_token
+            KeySchema:
+              - AttributeName: shopifydomain_checkout_token
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+  Outputs:
+    URL:
+      Value: https://${self:custom.customDomain.domainName}/v2
+      Export:
+        Name: payment-system-api-url-${self:custom.stage}
